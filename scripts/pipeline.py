@@ -1317,6 +1317,22 @@ def query_transfer(date=DEFAULT_DATE, via="徐州", source=None, interval=2.5,
 SOURCE_ENV = "TRAIN_SOURCE"          # mcp | urllib | auto（默认 auto）
 
 
+def _ticker(log, label, gap=15):
+    """慢请求期间的「还活着」提示。返回 (stop_event, 起算时间)。
+
+    12306 偶尔会把单个请求拖到几十秒（实测票价接口一次 42.6 秒），这段时间没有任何
+    输出，看起来就和卡死一样。这个守护线程每隔 gap 秒打一条，调用方做完就 stop.set()。
+    """
+    stop = threading.Event()
+    t0 = time.time()
+
+    def _run():
+        while not stop.wait(gap):
+            log(f"   …{label}（已 {time.time() - t0:.0f} 秒）")
+    threading.Thread(target=_run, daemon=True).start()
+    return stop, t0
+
+
 def _fetch_via_mcp(date, want_live, interval, log, conc=DEFAULT_CONC):
     """MCP 只负责**余票**；票价与经停一律走直连。
 
@@ -1337,8 +1353,11 @@ def _fetch_via_mcp(date, want_live, interval, log, conc=DEFAULT_CONC):
     _, live_cache = _cache_paths()
 
     log("① 票价与席别编组（直连 · 执行票价）")
-    t0 = time.time()
-    price = fetch_price(date=date, interval=interval)
+    stop, t0 = _ticker(log, "票价接口响应较慢，仍在等待", gap=10)
+    try:
+        price = fetch_price(date=date, interval=interval)
+    finally:
+        stop.set()
     log(f"   ✓ {len(price.get('data') or [])} 条（{time.time() - t0:.1f} 秒）")
 
     live = None
@@ -1346,15 +1365,7 @@ def _fetch_via_mcp(date, want_live, interval, log, conc=DEFAULT_CONC):
     if want_live:
         log("② 实时余票（走 mcp-server-12306；uvx 启动要联网解析包，"
             "首次约 10~60 秒，起不来会自动改用直连余票）")
-        t0 = time.time()
-        stop = threading.Event()
-
-        def _tick():
-            while not stop.wait(15):
-                log(f"   …仍在等 MCP 就绪（已 {time.time() - t0:.0f} 秒）；"
-                    f"久等无果会自动改用直连余票")
-
-        threading.Thread(target=_tick, daemon=True).start()
+        stop, t0 = _ticker(log, "仍在等 MCP 就绪；久等无果会自动改用直连余票")
         try:
             with mcp_client.open_client(log=lambda m: log("  " + m)) as cli:
                 live = mcp_source.load_live(cli, FROM_NAME, TO_NAME, date,
@@ -1363,9 +1374,10 @@ def _fetch_via_mcp(date, want_live, interval, log, conc=DEFAULT_CONC):
             log(f"   ✓ 余票 {len(live.get('trains') or {})} 趟"
                 f"（{time.time() - t0:.1f} 秒）")
         except Exception as e:
+            stop.set()
             log(f"   × MCP 不可用（{type(e).__name__}: {str(e)[:120]}）")
             log("   → 改用直连 leftTicket/query 取余票（该接口容易被限流）")
-            t0 = time.time()
+            stop, t0 = _ticker(log, "直连余票仍在等待", gap=10)
             try:
                 live = fetch_live(date=date, interval=interval)
                 live["source"] = "urllib-fallback"
@@ -1463,11 +1475,14 @@ def refresh(date=DEFAULT_DATE, want_live=True, interval=3.5, log=print,
     if not mcp_ok:
         log("数据源：内置直连（urllib）")
         report["source_used"] = "urllib"
-        log("① 票价与席别编组")
+        log("① 票价与席别编组（直连 · 执行票价）")
+        stop, t0 = _ticker(log, "票价接口响应较慢，仍在等待", gap=10)
         price = step("票价", fetch_price, date=date, interval=interval)
+        stop.set()
         if price is None:
             report["ok"] = False
             return None, report
+        log(f"   ✓ {len(price.get('data') or [])} 条（{time.time() - t0:.1f} 秒）")
 
         log("② 经停站（增量 · 直连）")
         stops = step("经停站", fetch_stops, date=date, interval=interval,
