@@ -42,6 +42,8 @@
     font-variant-numeric:tabular-nums;}
   .trow button.f.on .ecnt{opacity:.85;}
   #endgrp{gap:0;}
+  /* 中转站筛选（分第 1 / 2 程）：与始发/终到同一套 .trow 样式 */
+  #hubgrp{gap:0;}
   /* 区间筛选（发车时间 / 票价）：双滑块 + 数值 + 重置。
      为了把轨道做长，这一行的固定占宽都收到最紧：
      标签只留 4 个汉字的宽度、数值区刚好放得下「¥21.5 – ¥569」、
@@ -98,6 +100,8 @@
     transition:.12s;}
   .st:focus{outline:none;border-color:var(--acc);}
   .st.bad{border-color:#C2410C;background:#fdf3ee;}
+  /* 自定义中转站输入框：比始发终到选择器窄一点 */
+  .st.via{width:118px;}
   input.dt:focus{outline:none;border-color:var(--acc);
     box-shadow:0 0 0 3px rgba(24,95,165,.16);}
 
@@ -369,6 +373,13 @@
     <button class="f on" data-d="main" title="停靠车次 > 本通道车次的 30%（首末站始终保留）">主要站</button>
     <button class="f" data-d="hub" title="停靠车次 > 本通道车次的 70%（首末站始终保留）">枢纽站</button>
   </span>
+  <!-- 自定义中转：输入任意车站（不必是本通道经停站）作为中转点。
+       轴外车站会把图轴临时换成「起 → 中转 → 终」三行合成轴。 -->
+  <span class="grp" id="rtVia" title="输入任意车站作为中转点，不必是本通道经停站">
+    <span class="lbl">自定义中转</span>
+    <input class="st via" id="viaInput" placeholder="任意车站，如 南京" autocomplete="off">
+    <button class="f" id="viaGo" title="查询经该站中转的两段车次（等同点「刷新数据」）">查中转</button>
+  </span>
   <!-- 右端：中转 / 选中站的状态文字 + 数据时间 + 退出中转 / 取消选中。
        刷新按钮与数据快照在顶部 datebar 右端，不在这里。 -->
   <span class="rtend">
@@ -424,6 +435,8 @@
       <div class="grp" id="typegrp"></div>
       <div class="grp" id="seatgrp"></div>
       <div class="grp" id="endgrp"></div>
+      <!-- 中转站筛选：仅中转模式显示，分第 1 程（到达站）/ 第 2 程（出发站） -->
+      <div class="grp" id="hubgrp" style="display:none"></div>
       <div class="grp">
         <label class="chk"><input type="checkbox" id="hiTicket"> 高亮有票</label>
         <label class="chk"><input type="checkbox" id="showLbl"> 全部车次标签</label>
@@ -696,6 +709,37 @@ function renderEnds(){
       `</div>`);
   });
   g.innerHTML=lns.join("");
+}
+/* 中转站筛选两行（见下方 hubStations 的说明）：
+   仅中转模式有内容，直达模式整组隐藏。交互与始发/终到完全一致。 */
+function renderHubs(){
+  const g=document.getElementById("hubgrp");
+  if(!g) return;
+  if(!(TRANSFER&&TRANSFER.data)){
+    /* 退出中转也要清状态：否则残留的选择会在下次进入
+       「车站集合完全相同」的中转时（HUBKEY 命中）悄悄生效 */
+    HUBKEY=""; hubSel={1:null,2:null};
+    g.innerHTML=""; g.style.display="none"; return;
+  }
+  syncHubKey();
+  const st=hubStations(), lns=[], total=routeTrains().length;
+  [[1,"1程到",st.h1,st.c1,hubSel[1]],
+   [2,"2程发",st.h2,st.c2,hubSel[2]]].forEach(function(row){
+    const leg=row[0], lbl=row[1], arr=row[2], cnt=row[3], sel=row[4];
+    if(!arr.length) return;
+    const on=s=>!sel||sel.has(s);                  // null = 不限，等于全选
+    const allOn=arr.every(on);
+    lns.push(`<div class="trow"><span class="lbl">中转·${lbl}</span>`+
+      `<button class="f${allOn?" on":""}" data-huball="${leg}"`+
+      ` title="第${leg}程的中转站：全部 / 全不选「${arr.join("、")}」">全部</button>`+
+      arr.map(s=>`<button class="f${on(s)?" on":""}" data-hub="${leg}" `+
+        `data-hubv="${esc(s)}" title="${esc(s)}：${cnt.get(s)||0} 趟 / `+
+        `共 ${total} 趟">`+
+        `${esc(s)}<span class="ecnt">${cnt.get(s)||0}</span></button>`).join("")+
+      `</div>`);
+  });
+  g.innerHTML=lns.join("");
+  g.style.display=lns.length?"":"none";
 }
 function renderSeats(){
   const grp=document.getElementById("seatgrp");
@@ -1002,14 +1046,22 @@ function onAxisClick(city){
   if(TRANSFER){ TRANSFER=null; selected.clear(); leaveOnlyTick(); computeAxis(); }
   renderRouteLine(); drawChart();
 }
-async function loadTransfer(via){
+/* custom=true：轴外车站（自定义中转）——先把轴换成三行合成轴再取数；
+   默认（点轴上站名）：必须在 CUR_AXIS 里，行为与原来一致 */
+async function loadTransfer(via,custom){
   if(!CAN_API){
     alert("中转查询需要本地服务：请先双击项目里的「启动.bat」，再从 http 地址打开页面。");
     return;
   }
-  const row=CUR_AXIS.indexOf(via);
-  if(row<0) return;
-  TRANSFER={via, row, data:null, loading:true, items:null};
+  if(custom){
+    /* 合成轴由 computeAxis() 根据 TRANSFER.custom 生成，中转行固定为第 1 行 */
+    TRANSFER={via,row:1,custom:true,data:null,loading:true,items:null};
+    computeAxis();
+  }else{
+    const row=CUR_AXIS.indexOf(via);
+    if(row<0) return;
+    TRANSFER={via,row,data:null,loading:true,items:null};
+  }
   selected.clear();
   ZVIEW=null;                      // 换了一整套数据，时间窗按新数据自适应
   renderRouteLine(); drawChart();
@@ -1041,6 +1093,23 @@ async function loadTransfer(via){
   legStopTried=new Set();
   enrichLegStops();              // 自动补全「当前可见」车次的经停站
 }
+
+/* ---------- 自定义中转站：任意车站（不必在轴上） ----------
+   输入框回车或点「查中转」触发；效果等同点选轴上站名后刷新，
+   区别只是图轴临时换成「起 → 中转 → 终」三行合成轴。 */
+function startCustomTransfer(){
+  const inp=document.getElementById("viaInput");
+  const v=(inp.value||"").trim();
+  if(!v){ inp.focus(); return; }
+  /* 换中转点：旧结果立即作废（与 onAxisClick 同一套清理） */
+  if(TRANSFER){ TRANSFER=null; selected.clear(); leaveOnlyTick(); }
+  VIA=v;
+  loadTransfer(v,true);
+}
+document.getElementById("viaGo").addEventListener("click",startCustomTransfer);
+document.getElementById("viaInput").addEventListener("keydown",e=>{
+  if(e.key==="Enter"){ e.preventDefault(); startCustomTransfer(); }
+});
 
 /* ---------- 中转经停补全 ----------
    和直达**同一套查询原理**：用该程票价载荷里的内部列车编号（tn）与两端电报码
@@ -1133,6 +1202,16 @@ function deriveAxis(list){
 const DENSITY_RATE={main:0.30, hub:0.70};
 const DENSITY_CAP={main:12, hub:7};
 function computeAxis(){
+  /* 自定义中转（经轴外车站）：轴临时换成「起 → 中转 → 终」三行合成轴，
+     与点选轴上车站的中转模式共用同一套渲染逻辑（TRANSFER.row 固定为 1）。
+     退出中转后 TRANSFER=null，会走下面的正常流程还原原轴。 */
+  if(TRANSFER&&TRANSFER.custom){
+    const m=DATA.meta||{}, full=(DATA.axes&&DATA.axes[curRoute])||[];
+    const a=m.from_name||full[0]||"", b=m.to_name||full[full.length-1]||"";
+    CUR_AXIS=[a,TRANSFER.via,b].filter(Boolean);
+    CUR_AXIS_FULL=CUR_AXIS.slice();
+    return;
+  }
   const all=(DATA.axes&&DATA.axes[curRoute])||[];
   const fr=(DATA.freq&&DATA.freq[curRoute])||null;
   /* 车站频次与阈值分母永远按**本通道的车次**算。
@@ -1263,7 +1342,39 @@ function passEnd(t){
   return okFrom&&okTo;
 }
 function visible(t){
-  return passType(t)&&(!onlyTick||!!t.best)&&matchQ(t)&&passDep(t)&&passPrice(t)&&passEnd(t);
+  return passType(t)&&(!onlyTick||!!t.best)&&matchQ(t)&&passDep(t)&&passPrice(t)&&passEnd(t)&&passHub(t);
+}
+
+/* ---------- 中转站筛选（仅中转模式；分第 1 / 2 程） ----------
+   第 1 程筛**到达**中转城的实际车站（徐州 / 徐州东…），
+   第 2 程筛**出发**站。典型用途：自定义中转时两程在枢纽城常停不同站，
+   筛一筛就知道哪些组合能同站换乘、哪些要跨站接驳。
+   null = 不限（等价于全选）；进出中转 / 换 via 时随集合变化自动重置。 */
+let HUBKEY="", hubSel={1:null,2:null};
+function hubStations(){
+  const h1=new Map(), h2=new Map();          // 站名 → 涉及趟数
+  routeTrains().forEach(t=>{
+    if(t.from==null||t.to==null) return;
+    if(t.leg===1) tsetOf(t).forEach(s=>h1.set(s,(h1.get(s)||0)+1));
+    if(t.leg===2) fsetOf(t).forEach(s=>h2.set(s,(h2.get(s)||0)+1));
+  });
+  const srt=m=>Array.from(m.keys()).sort((a,b)=>(m.get(b)-m.get(a))||a.localeCompare(b,"zh"));
+  return {h1:srt(h1),h2:srt(h2),c1:h1,c2:h2};
+}
+function syncHubKey(){
+  const st=hubStations();
+  const k=st.h1.join(",")+"|"+st.h2.join(",");
+  if(k===HUBKEY) return;
+  HUBKEY=k; hubSel={1:null,2:null};
+}
+/* ⚠️ 与 passEnd 同理按程判断：第 1 程只认「到达站在所选集合」，
+   第 2 程只认「出发站在所选集合」；直达模式一律放行。 */
+function passHub(t){
+  if(!(TRANSFER&&TRANSFER.data)||!t.leg) return true;
+  const sel=hubSel[t.leg];
+  if(!sel) return true;
+  return t.leg===1 ? tsetOf(t).some(s=>sel.has(s))
+                   : fsetOf(t).some(s=>sel.has(s));
 }
 
 /* ---------- 发车时间 / 票价 区间筛选 ----------
@@ -1528,8 +1639,13 @@ function drawChart(){
     t0=ZVIEW.t0; t1=ZVIEW.t1;
   }
 
-  // 行高自适应：站多则压缩，保证整图高度可控
-  const rowH=Math.max(19,Math.min(32,Math.round(600/Math.max(1,cities.length-1))));
+  // 行高自适应：站多则压缩，保证整图高度可控。
+  // 自定义中转的合成轴只有 3 行：按常规公式会取到 32px 上限，整图被压成
+  // 1280×120 的扁带，车次线横向拉得又平又长 —— 三行轴改用大行高，
+  // 让两程的车次线有足够的纵向空间，整图比例恢复正常。
+  const rowH=(TRANSFER&&TRANSFER.custom)
+    ? 150
+    : Math.max(19,Math.min(32,Math.round(600/Math.max(1,cities.length-1))));
   const dMid=Math.max(2.3,Math.min(DOT_MID,rowH*0.075));
   const dEnd=Math.max(3.2,Math.min(DOT_END,rowH*0.105));
   /* L 是左侧站名留白：要放得下「郑州航空港」这类 5 字站名（12px ≈ 60px + 10px 间距），
@@ -1964,6 +2080,7 @@ function renderRouteLine(){
   renderTypes();
   renderSeats();
   renderEnds();
+  renderHubs();
   renderLegend();
   routeLineBody();
 }
@@ -2076,6 +2193,28 @@ document.getElementById("endgrp").addEventListener("click",e=>{
   }
   setEndSel(side,sel);
   renderEnds();
+  apply();
+});
+/* 中转站筛选：交互与始发/终到一致 —— 点单个站 = 切换；点「全部」= 全选 / 全不选。
+   第 1 程判到达站、第 2 程判出发站（见 passHub）。 */
+document.getElementById("hubgrp").addEventListener("click",e=>{
+  const b=e.target.closest("button");
+  if(!b) return;
+  const leg=b.dataset.hub||b.dataset.huball;
+  if(!leg) return;
+  const st=hubStations();
+  const arr=leg==="1"?st.h1:st.h2;
+  let sel=hubSel[leg];
+  if(b.dataset.huball!==undefined){
+    sel=(sel===null||sel.size>=arr.length)?new Set():null;   // 已全选 → 清空；否则 → 全选
+  }else{
+    if(sel===null) sel=new Set(arr);                         // 从「不限」转成显式集合
+    const v=b.dataset.hubv;
+    if(sel.has(v)) sel.delete(v); else sel.add(v);
+    if(sel.size>=arr.length) sel=null;                       // 又凑齐全选 → 回到不限
+  }
+  hubSel[leg]=sel;
+  renderHubs();
   apply();
 });
 /* 排序不再单独占一行：由表头「起价」按钮驱动（见 renderSortBtn） */
@@ -2419,7 +2558,8 @@ async function startRefresh(dt,opt){
     if(!CAN_API){ setMsg("中转查询需要本地服务，请先双击「启动.bat」","err"); return; }
     setMsg(`正在实时抓取经 ${VIA} 中转的两段车次，请稍候…（约 5–10 秒）`);
     btnRf.classList.add("busy"); btnRf.disabled=true;
-    await loadTransfer(VIA);
+    /* 若当前就是自定义中转（轴外车站），重查时仍按合成轴渲染 */
+    await loadTransfer(VIA, !!(TRANSFER&&TRANSFER.custom));
     btnRf.classList.remove("busy"); btnRf.disabled=false;
     if(TRANSFER&&TRANSFER.data){
       const l=TRANSFER.data.legs;
