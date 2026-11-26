@@ -33,8 +33,11 @@ SEAT_AVAIL = {
     "hard_seat": "yz", "no_seat": "wz", "standing": "wz",
 }
 # ---- train_class_name → 车型字母（仅用于日志核对，build() 用 train_code 首字母）----
+# 2026 版车次编排：普速启用 Z/N/V（N=原T、V=原K/数字），
+# 12 月下旬起 T/K/X 为动车组字头（T=300km、K=200-250km、X=350km+），S=市域。
 CLASS_TO_TYPE = {"高速": "G", "动车": "D", "城际": "C",
-                 "直特": "Z", "特快": "T", "快速": "K"}
+                 "直特": "Z", "特快": "T", "快速": "K",
+                 "市域": "S"}
 
 DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     "data")

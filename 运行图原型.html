@@ -356,11 +356,7 @@
 
 <div class="panel">
   <div class="leg" style="margin-top:0;padding-top:0;border-top:none;">
-    <div class="grp"><span class="lbl">线型 = 车型</span>
-      <span class="sw"><svg width="28" height="10"><line x1="0" y1="5" x2="28" y2="5" stroke="#5f5e5a" stroke-width="2.7"/></svg>高铁 G</span>
-      <span class="sw"><svg width="28" height="10"><line x1="0" y1="5" x2="28" y2="5" stroke="#5f5e5a" stroke-width="2.3" stroke-dasharray="10,5"/></svg>动车 D / 城际 C</span>
-      <span class="sw"><svg width="28" height="10"><line x1="0" y1="5" x2="28" y2="5" stroke="#5f5e5a" stroke-width="2" stroke-dasharray="2,4"/></svg>普速 Z / T / K / 数字</span>
-    </div>
+    <div class="grp" id="lineLegend"></div>
     <div class="grp"><span class="lbl">颜色 = 最低可购席别</span><span id="legSeats"></span></div>
   </div>
 </div>
@@ -509,22 +505,41 @@ const SEAT = {
   yw:{n:"硬卧",c:"#0F6E56",r:3},    rz:{n:"软座",c:"#639922",r:2},
   yz:{n:"硬座",c:"#5F5E5A",r:1},    wz:{n:"无座",c:"#888780",r:0}
 };
-/* 普速（Z 直达 / T 特快 / K 普快 / 纯数字车次）**共用一种线型**，
-   只有 G / D·C 各自不同，这样图上只需分辨三类。 */
+/* 线型只分三类：实线 = 高速动车组，长虚 = 动车 / 动集 / 城际 / 市域，
+   点虚 = 普速。同一类里的字头不在线型上区分。 */
 const PT_LINE={w:2.0,dash:"2,4"};
-const TYPE = {
-  G:{n:"高铁",w:2.7,dash:"none"},   D:{n:"动车",w:2.3,dash:"10,5"},
-  C:{n:"城际",w:2.3,dash:"10,5"},   Z:{n:"直达",...PT_LINE},
-  T:{n:"特快",...PT_LINE},          K:{n:"普快",...PT_LINE}
+const DMJ_LINE={w:2.3,dash:"10,5"};
+const HS_LINE={w:2.7,dash:"none"};
+/* 2026 版《列车车次编排规定》分两批实施：
+   11-25 起（第一批）：普速启用 Z/N/V —— Z 保留（160km 快速），
+     N = 原 T（140km 快速），V = 原 K 与纯数字（120km 普速，
+     V1-V5998 快车 / V6001-V6998 普快 / V7001-V7998 慢车）；
+   12 月下旬起（第二批，BATCH2 近似切换日）：T/K 转为动车组字头
+     （T = 300km、K = 200-250km），新增 X（350km 以上复兴号）与 S（市域）。
+   所以 T/K 的含义按乘车日期切换，旧缓存数据集不受影响。 */
+const BATCH2="2026-12-20";
+const TYPE_LEGACY={
+  G:{n:"高铁 G",...HS_LINE},        D:{n:"动车 D",...DMJ_LINE},
+  C:{n:"城际 C",...DMJ_LINE},       Z:{n:"直达 Z",...PT_LINE},
+  T:{n:"动车特快 T",...PT_LINE},        K:{n:"K",...PT_LINE},
+  N:{n:"N",...PT_LINE},        V:{n:"V",...PT_LINE}
 };
+const TYPE_NEW={
+  X:{n:"复兴 X",...HS_LINE},        G:{n:"高铁 G",...HS_LINE},
+  T:{n:"动车特快 T",...HS_LINE},        D:{n:"动集 D",...DMJ_LINE},
+  K:{n:"动车快速 K",...DMJ_LINE},       C:{n:"城际 C",...DMJ_LINE},
+  S:{n:"市域 S",...DMJ_LINE},       Z:{n:"Z",...PT_LINE},
+  N:{n:"N",...PT_LINE},        V:{n:"V",...PT_LINE}
+};
+/* 车型筛选用的键：纯数字车次按新规并入 V 字头 */
+const TYPE_ORDER=["X","G","T","D","K","C","S","Z","N","V"];
+function trainDate(){ return (DATA.meta&&DATA.meta.travel_date)||""; }
+function typeMap(){ return trainDate()>=BATCH2?TYPE_NEW:TYPE_LEGACY; }
+function typeLabel(k){ const e=typeMap()[k]; return e?e.n:k; }
+function tkey(t){ return /^\d$/.test(String(t.type))?"V":String(t.type); }
+/* 某趟车的线型 / 车型名。未知字头一律按普速处理 */
+function tinfo(tr){ return typeMap()[tkey(tr)]||{n:"普速",...PT_LINE}; }
 const GREY="#C9C7BE", UNK="#B4B2A9";
-/* 车型筛选用的键：纯数字车次统一归为 "N"，其余用首字母 */
-const TYPE_ORDER=["G","D","C","Z","T","K","N"];
-const TYPE_LABEL={G:"高铁 G",D:"动车 D",C:"城际 C",Z:"直达 Z",
-                  T:"特快 T",K:"普快 K",N:"数字车次"};
-function tkey(t){return /^\d$/.test(String(t.type))?"N":String(t.type);}
-/* 某趟车的线型 / 车型名。纯数字车次没有 TYPE 条目，统一按普速处理 */
-function tinfo(tr){return TYPE[tr.type]||{n:"普速",...PT_LINE};}
 /* 通道名与通道说明都来自数据集（build() 会按「停靠车次最多的几个中间站」
    自动生成 desc），下面这份只是拿不到时的兜底文案。
    起终点可自定义，所以通道名不再是固定的三条。 */
@@ -659,10 +674,9 @@ function seatKeys(){
 /* 车型按钮：正常模式一行（用全名）；中转模式两行、每行要放 5~6 个，
    侧栏放不下，所以改用紧凑标签，全名放到 title 里。 */
 function typeBtn(k,on,leg,short){
-  const full=TYPE_LABEL[k]||k;
-  const txt=short?(k==="N"?"数字":k):full;
+  const full=typeLabel(k);
   return `<button class="f${on?" on":""}" data-ty="${k}" data-leg="${leg}"`+
-         ` title="${full}">${txt}</button>`;
+         ` title="${full}">${short?k:full}</button>`;
 }
 function renderTypes(){
   const el=document.getElementById("typegrp");
@@ -740,6 +754,24 @@ function renderHubs(){
   });
   g.innerHTML=lns.join("");
   g.style.display=lns.length?"":"none";
+}
+/* 线型图例：随 T/K 语义切换（见 BATCH2）选对应那套字头说明 */
+function renderLineLegend(){
+  const g=document.getElementById("lineLegend");
+  if(!g) return;
+  const nw=trainDate()>=BATCH2;
+  const rows=nw
+    ? [[HS_LINE.w,"","X · G · T 高速动车组"],
+       [DMJ_LINE.w,"10,5","K · D · S · C 动车 / 动集 / 市域"],
+       [PT_LINE.w,"2,4","Z · N · V 普速"]]
+    : [[HS_LINE.w,"","G 高铁"],
+       [DMJ_LINE.w,"10,5","D / C 动车 / 城际"],
+       [PT_LINE.w,"2,4","Z / T / K / 数字 普速"]];
+  g.innerHTML=`<span class="lbl">线型 = 车型</span>`+
+    rows.map(r=>`<span class="sw" title="${nw?"2026 版新车次（12 月下旬第二批起）":"2026 年 12 月中旬前的旧车次口径"}">`+
+      `<svg width="28" height="10"><line x1="0" y1="5" x2="28" y2="5" `+
+      `stroke="#5f5e5a" stroke-width="${r[0]}"`+
+      (r[1]?` stroke-dasharray="${r[1]}"`:"")+`/></svg>${r[2]}</span>`).join("");
 }
 function renderSeats(){
   const grp=document.getElementById("seatgrp");
@@ -2082,6 +2114,7 @@ function renderRouteLine(){
   renderEnds();
   renderHubs();
   renderLegend();
+  renderLineLegend();
   routeLineBody();
 }
 function routeLineBody(){
